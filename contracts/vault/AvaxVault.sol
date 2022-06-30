@@ -8,19 +8,18 @@ import "@openzeppelin/contracts-upgradeable/token/ERC20/extensions/ERC20Burnable
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+
 import "../libraries/math/PercentageMath.sol";
 import "../interfaces/IWAVAX.sol";
 
 import {BenqiStrategy} from "./strategies/BenqiStrategy.sol";
 import {AaveStrategy} from "./strategies/AaveStrategy.sol";
-import "hardhat/console.sol";
 
 /**
  * @title GeneralVault
  * @notice Basic feature of vault
  * @author Dede
  **/
-
 contract AvaxVault is Initializable, OwnableUpgradeable, ERC20Upgradeable, ERC20BurnableUpgradeable {
   using PercentageMath for uint256;
   using SafeERC20 for IERC20;
@@ -41,13 +40,14 @@ contract AvaxVault is Initializable, OwnableUpgradeable, ERC20Upgradeable, ERC20
   uint256 private constant VAULT_VERSION = 0x1;
   address public constant WAVAX = 0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7;
 
-  // vault fee 20%
   uint256 private _vaultFee;
   address private _treasuryAddress;
   Strategy private _currentStrategy;
   bool private _shouldHarvestOnDeposit;
   mapping(address => bool) private _whitelist;
   mapping(address => bool) private _isKeeper;
+
+  /* ========== MODIFIERS ========== */
 
   modifier onlyWhitelisted() {
     require(_whitelist[msg.sender], "CALLER_ADDRESS_NOT_WHITELISTED");
@@ -64,10 +64,11 @@ contract AvaxVault is Initializable, OwnableUpgradeable, ERC20Upgradeable, ERC20
     _shouldHarvestOnDeposit = true;
   }
 
-  function getVersion() internal pure returns (uint256) {
-    return VAULT_VERSION;
-  }
+  /* ========== PRIVATE FUNCTIONS ========== */
 
+  /**
+   * @dev delegate a deposit to the current strategy
+   **/
   function _strategyDeposit(uint256 amount) private {
     if (_currentStrategy == Strategy.AAVE) {
       AaveStrategy.deposit(WAVAX, amount);
@@ -79,22 +80,25 @@ contract AvaxVault is Initializable, OwnableUpgradeable, ERC20Upgradeable, ERC20
     BenqiStrategy.deposit(amount);
   }
 
+  /**
+   * @dev delegate a withdrawal to the current strategy
+   **/
   function _strategyWithdraw(uint256 amount) private {
     if (_currentStrategy == Strategy.AAVE) {
       AaveStrategy.withdraw(WAVAX, amount, msg.sender);
       return;
     }
 
-    console.log("strategy withdraw benqi");
     // convert underlying asset amount to bearing token amount
     uint256 bearingTokenAmount = BenqiStrategy.estimateConversionToBearingTokenAmount(amount);
     uint256 amountAVAX = BenqiStrategy.redeem(bearingTokenAmount);
-    console.log("amountAVAX", amountAVAX);
     IWAVAX(WAVAX).deposit{value: amountAVAX}();
-    console.log("transfer");
     IERC20(WAVAX).transfer(msg.sender, amountAVAX);
   }
 
+  /**
+   * @dev harvest accmulated yield and reinvest
+   **/
   function _strategyHarvest() private returns (uint256) {
     if (_currentStrategy == Strategy.AAVE) {
       return AaveStrategy.harvest(true);
@@ -103,33 +107,31 @@ contract AvaxVault is Initializable, OwnableUpgradeable, ERC20Upgradeable, ERC20
     return BenqiStrategy.harvest(true);
   }
 
+  /**
+   * @dev convert yield in bearing token to underlying token
+   **/
+  function _redeemYield(uint256 yieldAmount) internal returns (uint256) {
+    if (_currentStrategy == Strategy.AAVE) {
+      uint256 amountWAVAX = AaveStrategy.withdraw(WAVAX, yieldAmount, address(this));
+      return amountWAVAX;
+    }
+
+    uint256 balBefore = address(this).balance;
+    BenqiStrategy.redeemUnderlying(yieldAmount);
+    uint256 amountAVAX = address(this).balance - balBefore;
+    // convert AVAX in to WAVAX
+    IWAVAX(WAVAX).deposit{value: amountAVAX}();
+    return amountAVAX;
+  }
+
+  /* ========== PUBLIC FUNCTIONS ========== */
+
   function getBearingToken() public view returns (address) {
     if (_currentStrategy == Strategy.AAVE) {
       return AaveStrategy.getBearingToken();
     }
 
     return BenqiStrategy.getBearingToken();
-  }
-
-  function deposit(uint256 amount) external onlyWhitelisted {
-    IERC20(WAVAX).transferFrom(msg.sender, address(this), amount);
-    _strategyDeposit(amount);
-
-    if (_shouldHarvestOnDeposit) {
-      address bearingToken = getBearingToken();
-      uint256 harvestedAmount = _strategyHarvest();
-      emit Harvest(bearingToken, harvestedAmount);
-    }
-
-    // mint the same underlying token amount to the depositor
-    _mint(msg.sender, amount);
-    emit Deposit(msg.sender, amount);
-  }
-
-  function withdraw(uint256 amount) external onlyWhitelisted {
-    _burn(msg.sender, amount);
-    _strategyWithdraw(amount);
-    emit Withdraw(msg.sender, amount);
   }
 
   function getYieldAmount() public returns (uint256) {
@@ -154,19 +156,30 @@ contract AvaxVault is Initializable, OwnableUpgradeable, ERC20Upgradeable, ERC20
     return BenqiStrategy.balanceOfUnderlying(address(this));
   }
 
-  function _redeemYield(uint256 yieldAmount) internal returns (uint256) {
-    if (_currentStrategy == Strategy.AAVE) {
-      uint256 amountWAVAX = AaveStrategy.withdraw(WAVAX, yieldAmount, address(this));
-      return amountWAVAX;
+  /* ========== EXTERNAL FUNCTIONS ========== */
+
+  function deposit(uint256 amount) external onlyWhitelisted {
+    IERC20(WAVAX).transferFrom(msg.sender, address(this), amount);
+    _strategyDeposit(amount);
+
+    if (_shouldHarvestOnDeposit) {
+      address bearingToken = getBearingToken();
+      uint256 harvestedAmount = _strategyHarvest();
+      emit Harvest(bearingToken, harvestedAmount);
     }
 
-    uint256 balBefore = address(this).balance;
-    BenqiStrategy.redeemUnderlying(yieldAmount);
-    uint256 amountAVAX = address(this).balance - balBefore;
-    // convert AVAX in to WAVAX
-    IWAVAX(WAVAX).deposit{value: amountAVAX}();
-    return amountAVAX;
+    // mint the same underlying token amount to the depositor
+    _mint(msg.sender, amount);
+    emit Deposit(msg.sender, amount);
   }
+
+  function withdraw(uint256 amount) external onlyWhitelisted {
+    _burn(msg.sender, amount);
+    _strategyWithdraw(amount);
+    emit Withdraw(msg.sender, amount);
+  }
+
+  /* ========== FUNCTIONS FOR KEEPERS ========== */
 
   /**
    * @dev Grab excess stETH which was from rebasing on Lido
@@ -177,8 +190,8 @@ contract AvaxVault is Initializable, OwnableUpgradeable, ERC20Upgradeable, ERC20
 
     uint256 fee = _vaultFee;
     uint256 yieldAmount = getYieldAmount();
-
     uint256 redeemedAmount = _redeemYield(yieldAmount);
+
     if (fee > 0) {
       uint256 treasuryAmount = redeemedAmount.percentMul(fee);
       IERC20(WAVAX).safeTransfer(_treasuryAddress, treasuryAmount);
@@ -188,6 +201,8 @@ contract AvaxVault is Initializable, OwnableUpgradeable, ERC20Upgradeable, ERC20
     IERC20(WAVAX).safeTransfer(msg.sender, redeemedAmount);
     emit ProcessYield(WAVAX, redeemedAmount);
   }
+
+  /* ========== FUNCTIONS FOR OWNER ========== */
 
   /**
    * @dev Set treasury address and vault fee
@@ -203,33 +218,15 @@ contract AvaxVault is Initializable, OwnableUpgradeable, ERC20Upgradeable, ERC20
     emit SetTreasuryInfo(_treasury, _fee);
   }
 
-  function setHarvestOnDeposit(bool flag) external onlyOwner {
-    _shouldHarvestOnDeposit = flag;
-  }
-
-  function checkShouldHarvestOnDeposit() external view returns (bool) {
-    return _shouldHarvestOnDeposit;
-  }
-
-  function setKeeper(address addr, bool flag) external onlyOwner {
-    _isKeeper[addr] = flag;
-  }
-
-  function isKeeper(address addr) external view returns (bool) {
-    return _isKeeper[addr];
-  }
-
-  function setWhitelist(address addr, bool flag) external onlyOwner {
-    _whitelist[addr] = flag;
-  }
-
-  function isWhitelisted(address addr) external view returns (bool) {
-    return _whitelist[addr];
-  }
-
+  /**
+   * @dev Force the vault to switch to a new strategy that gives more yield
+   *   Before switching to new strategy, the vault will harvest all the remaining yield of the current strategy
+   * @param newStrategy The new strategy that will be applied to the vault
+   */
   function switchStrategy(Strategy newStrategy) external onlyOwner {
     require(newStrategy != _currentStrategy, "MUST_BE_A_DIFFERENT_STRATEGY");
 
+    // Check if no funds deposited
     uint256 underlyingBal = balanceOfUnderlying();
     if (underlyingBal == 0) {
       _currentStrategy = newStrategy;
@@ -238,21 +235,21 @@ contract AvaxVault is Initializable, OwnableUpgradeable, ERC20Upgradeable, ERC20
     }
 
     if (_currentStrategy == Strategy.AAVE && newStrategy == Strategy.BENQI) {
-      // TODO: do not fail if there is no fund in AAV strategy
       // Withdraw all funds from Aave and deposit to Benqi
       uint256 withdrawalAmount = AaveStrategy.withdrawAll(WAVAX);
-      // harvest remaining reward
-      uint256 reward = AaveStrategy.harvest(false);
-
-      uint256 totalAmount = withdrawalAmount + reward;
+      // harvest remaining reward in WAVAX
+      uint256 rewardAmount = AaveStrategy.harvest(false);
+      uint256 totalAmount = withdrawalAmount + rewardAmount;
+      // convert WAVAX into AVAX
       IWAVAX(WAVAX).withdraw(totalAmount);
+      // deposit AVAX to BenQI
       BenqiStrategy.deposit(totalAmount);
     } else if (_currentStrategy == Strategy.BENQI && newStrategy == Strategy.AAVE) {
       uint256 withdrawalAmount = BenqiStrategy.redeemAll();
       // harvest remaining reward
-      uint256 reward = BenqiStrategy.harvest(false);
+      uint256 rewardAmount = BenqiStrategy.harvest(false);
       // totalAmount in AVAX
-      uint256 totalAmount = withdrawalAmount + reward;
+      uint256 totalAmount = withdrawalAmount + rewardAmount;
       AaveStrategy.depositAVAX(totalAmount);
     }
 
@@ -262,6 +259,36 @@ contract AvaxVault is Initializable, OwnableUpgradeable, ERC20Upgradeable, ERC20
 
   function recoverToken(address token, uint256 amount) external onlyOwner {
     IERC20(token).safeTransfer(owner(), amount);
+  }
+
+  function setHarvestOnDeposit(bool flag) external onlyOwner {
+    _shouldHarvestOnDeposit = flag;
+  }
+
+  function setKeeper(address addr, bool flag) external onlyOwner {
+    _isKeeper[addr] = flag;
+  }
+
+  function setWhitelist(address addr, bool flag) external onlyOwner {
+    _whitelist[addr] = flag;
+  }
+
+  /* ========== EXTERNAL VIEW FUNCTIONS ========== */
+
+  function checkShouldHarvestOnDeposit() external view returns (bool) {
+    return _shouldHarvestOnDeposit;
+  }
+
+  function isKeeper(address addr) external view returns (bool) {
+    return _isKeeper[addr];
+  }
+
+  function isWhitelisted(address addr) external view returns (bool) {
+    return _whitelist[addr];
+  }
+
+  function getVersion() external pure returns (uint256) {
+    return VAULT_VERSION;
   }
 
   /**

@@ -58,7 +58,6 @@ contract AaveIncentiveControllerMock {
     address user,
     address reward
   ) external view returns (uint256) {
-    console.log("thisis being called");
     return availableRewards[user];
   }
 

@@ -40,6 +40,12 @@ contract AvaxAaveVault is Initializable, OwnableUpgradeable, ERC20Upgradeable, E
 
   bool public shouldHarvestOnDeposit;
   mapping(address => bool) public _isKeeper;
+  mapping(address => bool) private _whitelist;
+
+  modifier onlyWhitelisted() {
+    require(_whitelist[msg.sender], "CALLER_ADDRESS_NOT_WHITELISTED");
+    _;
+  }
 
   /**
    * @dev Function is invoked by the proxy contract when the Vault contract is deployed.
@@ -55,7 +61,7 @@ contract AvaxAaveVault is Initializable, OwnableUpgradeable, ERC20Upgradeable, E
     return VAULT_VERSION;
   }
 
-  function deposit(uint256 amount) external {
+  function deposit(uint256 amount) external onlyWhitelisted {
     IERC20(WAVAX).transferFrom(msg.sender, address(this), amount);
     // receiptAmount of bearing token
     AaveStrategy.deposit(WAVAX, amount);
@@ -69,7 +75,11 @@ contract AvaxAaveVault is Initializable, OwnableUpgradeable, ERC20Upgradeable, E
     _mint(msg.sender, amount);
   }
 
-  function withdraw(uint256 amount) external {
+  function setWhitelist(address addr, bool flag) external onlyOwner {
+    _whitelist[addr] = flag;
+  }
+
+  function withdraw(uint256 amount) external onlyWhitelisted {
     _burn(msg.sender, amount);
     AaveStrategy.withdraw(WAVAX, amount, msg.sender);
   }

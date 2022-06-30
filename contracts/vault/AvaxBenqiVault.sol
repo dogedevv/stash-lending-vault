@@ -41,6 +41,12 @@ contract AvaxBenqiVault is Initializable, OwnableUpgradeable, ERC20Upgradeable, 
 
   bool public shouldHarvestOnDeposit;
   mapping(address => bool) public _isKeeper;
+  mapping(address => bool) private _whitelist;
+
+  modifier onlyWhitelisted() {
+    require(_whitelist[msg.sender], "CALLER_ADDRESS_NOT_WHITELISTED");
+    _;
+  }
 
   /**
    * @dev Function is invoked by the proxy contract when the Vault contract is deployed.
@@ -56,7 +62,7 @@ contract AvaxBenqiVault is Initializable, OwnableUpgradeable, ERC20Upgradeable, 
     return VAULT_VERSION;
   }
 
-  function deposit(uint256 amount) external {
+  function deposit(uint256 amount) external onlyWhitelisted {
     IERC20(WAVAX).transferFrom(msg.sender, address(this), amount);
 
     console.log("step withdraw");
@@ -74,7 +80,7 @@ contract AvaxBenqiVault is Initializable, OwnableUpgradeable, ERC20Upgradeable, 
     _mint(msg.sender, amount);
   }
 
-  function withdraw(uint256 amount) external {
+  function withdraw(uint256 amount) external onlyWhitelisted {
     // Convert amount of vToken to bearing token's amount of Benqi strategy
     _burn(msg.sender, amount);
     uint256 bearingTokenAmount = _convertToBearingTokenAmount(amount);
@@ -145,6 +151,10 @@ contract AvaxBenqiVault is Initializable, OwnableUpgradeable, ERC20Upgradeable, 
 
   function setKeeper(address addr, bool flag) external onlyOwner {
     _isKeeper[addr] = flag;
+  }
+
+  function setWhitelist(address addr, bool flag) external onlyOwner {
+    _whitelist[addr] = flag;
   }
 
   /**

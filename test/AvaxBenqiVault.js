@@ -62,6 +62,9 @@ describe('BenqiVault', async () => {
 
     this.wavax = new ethers.Contract(WAVAX, erc20Abi, owner)
     this.wavaxWhale = await ethers.getSigner(WAVAX_WHALE)
+
+    await this.avaxVault.connect(this.owner).setWhitelist(this.wavaxWhale.address, true)
+    await this.avaxVault.connect(this.owner).setWhitelist(this.user1.address, true)
   })
 
   describe('Test initialization', () => {
