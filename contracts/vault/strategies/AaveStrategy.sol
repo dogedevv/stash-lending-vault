@@ -39,7 +39,7 @@ library AaveStrategy {
   }
 
   function withdrawAVAX(uint256 amount, address receiver) internal returns (uint256) {
-    address bearingToken = getBearingToken(WAVAX);
+    address bearingToken = getBearingToken();
     IERC20(bearingToken).approve(WETH_GATEWAY, 0);
     IERC20(bearingToken).approve(WETH_GATEWAY, amount);
 
@@ -47,9 +47,15 @@ library AaveStrategy {
     return amount;
   }
 
-  // harvest reward for asset
-  function harvest(address asset, bool shouldReinvest) internal returns (uint256 harvestedAmount) {
-    address bearingToken = getBearingToken(asset);
+  function withdrawAll(address asset) internal returns (uint256) {
+    uint256 assetBalBefore = IERC20(asset).balanceOf(address(this));
+    ILendingPool(LENDING_POOL).withdraw(asset, type(uint256).max, address(this));
+    uint256 withdrawAmount = IERC20(asset).balanceOf(address(this)) - assetBalBefore;
+    return withdrawAmount;
+  }
+
+  function harvest(bool shouldReinvest) internal returns (uint256 harvestedAmount) {
+    address bearingToken = getBearingToken();
     uint256 rewards = availableRewards(bearingToken, address(this));
 
     if (rewards == 0) {
@@ -72,20 +78,20 @@ library AaveStrategy {
       }
 
       emit StratHarvest(msg.sender, WAVAX, rewardHarvestedAmount);
-
-      return rewardHarvestedAmount;
     }
+
+    return rewardHarvestedAmount;
   }
 
-  function availableRewards(address aToken, address ofAddress) internal returns (uint256) {
+  function availableRewards(address aToken, address ofAddress) internal view returns (uint256) {
     address[] memory assets = new address[](1);
     assets[0] = aToken;
     // get WAVAX reward amount
     return IAaveV3Incentives(INCENTIVES_CONTROLLER).getUserRewards(assets, ofAddress, WAVAX);
   }
 
-  function getBearingToken(address asset) internal view returns (address) {
-    (address aToken, , ) = IDataProvider(DATA_PROVIDER).getReserveTokensAddresses(asset);
+  function getBearingToken() internal view returns (address) {
+    (address aToken, , ) = IDataProvider(DATA_PROVIDER).getReserveTokensAddresses(WAVAX);
     return aToken;
   }
 }

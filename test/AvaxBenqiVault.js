@@ -1,7 +1,7 @@
 const chai = require('chai')
 const { ethers, waffle } = require('hardhat')
 const { solidity } = require('ethereum-waffle')
-const { deployAvaxVault } = require('../scripts/vault')
+const { deployVault } = require('../scripts/vault')
 
 const erc20Abi = require('../abis/erc20.abi.json')
 
@@ -40,16 +40,17 @@ const deployMockAaveRewardController = async () => {
   return incentivesControllerMock
 }
 
-describe('AvaxVault', async () => {
+describe('BenqiVault', async () => {
   before(async () => {
     const [owner, user1] = await ethers.getSigners()
 
     this.owner = owner
     this.user1 = user1
     this.addressProvider = await deployMockAddressProvider()
-    this.lendingPool = await deployMockLendingPool()
-    this.avaxVault = await deployAvaxVault(this.addressProvider.address)
-    this.aaveIncentivesController = await deployMockAaveRewardController()
+    // this.lendingPool = await deployMockLendingPool()
+    this.avaxVault = await deployVault('AvaxBenqiVault')
+    await this.avaxVault.initialize()
+    // this.aaveIncentivesController = await deployMockAaveRewardController()
 
     const WAVAX = '0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7'
     const WAVAX_WHALE = '0x6c1a5ef2acde1fd2fc68def440d2c1eb35bae24a'
@@ -69,265 +70,114 @@ describe('AvaxVault', async () => {
       expect(bal).to.gt(0)
     })
 
-    it('should be return correct admin', async () => {
-      const POOL_ADMIN = ethers.utils.formatBytes32String('POOL_ADMIN')
-      await this.addressProvider.setAddress(POOL_ADMIN, this.owner.address)
-      const poolAdmin = await this.addressProvider.getPoolAdmin()
-      expect(poolAdmin).to.eq(this.owner.address)
-
-      const LENDING_POOL = ethers.utils.formatBytes32String('LENDING_POOL')
-      await this.addressProvider.setAddress(LENDING_POOL, this.lendingPool.address)
-      const lendingPool = await this.addressProvider.getLendingPool()
-      expect(lendingPool).to.eq(this.lendingPool.address)
-    })
-
-    describe('Test aave incentivesControllerMock', () => {
+    describe('BENQI Strategy', () => {
+      let aToken
+      let bearingToken
       before(async () => {
-        // send 1000 wavax
-        this.wavax
-          .connect(this.wavaxWhale)
-          .transfer(this.aaveIncentivesController.address, ethers.utils.parseEther('1000'))
+        // switch to benqi strategy
+        const bearingTokenAddr = await this.avaxVault.bearingToken()
+        bearingToken = await ethers.getContractAt('IqiAVAX', bearingTokenAddr, this.owner)
       })
 
-      it('should be able to set rewards', async () => {
-        await this.aaveIncentivesController
-          .connect(this.owner)
-          .setAvailableRewards(this.user1.address, ethers.utils.parseEther('10'))
+      describe('depositCollateral', () => {
+        it('should be able to deposit WAVAX as collateral successfully', async () => {
+          const amountAVAX = ethers.utils.parseEther('100')
+          // const balBearingTokenOfPoolBefore = await bearingToken.balanceOf(this.lendingPool.address)
+          await this.wavax.connect(this.wavaxWhale).approve(this.avaxVault.address, ethers.constants.MaxUint256)
+          //
+          const vTokenBalBefore = await this.avaxVault.balanceOf(this.wavaxWhale.address)
+          await this.avaxVault.connect(this.wavaxWhale).deposit(amountAVAX)
+
+          const balBearingTokenOfVault = await bearingToken.balanceOf(this.avaxVault.address)
+          // expect(balBearingTokenOfPoolAfter).to.gt(balBearingTokenOfPoolBefore.add(amountAVAX))
+          const vTokenBalAfter = await this.avaxVault.balanceOf(this.wavaxWhale.address)
+          expect(vTokenBalAfter).eq(vTokenBalBefore.add(amountAVAX))
+          expect(balBearingTokenOfVault).to.gt(0)
+        })
       })
 
-      it('should be able to get rewards', async () => {
-        const availableRewards = await this.aaveIncentivesController.getUserRewards(
-          [this.wavax.address],
-          this.user1.address,
-          this.wavax.address
-        )
-        expect(availableRewards).to.eq(ethers.utils.parseEther('10'))
-      })
+      describe('withdrawCollateral', () => {
+        // it('should be able to withdraw', async () => {
+        //   const amountAVAX = ethers.utils.parseEther('100')
+        //   await this.wavax.connect(this.wavaxWhale).transfer(this.user1.address, amountAVAX)
 
-      it('should be able to claim rewards', async () => {
-        const rewardAmount = ethers.utils.parseEther('10')
-        const balwavaxBefore = await this.wavax.balanceOf(this.user1.address)
-        await this.aaveIncentivesController
-          .connect(this.user1)
-          .claimRewards([this.wavax.address], rewardAmount, this.user1.address, this.wavax.address)
-        const balwavaxAfter = await this.wavax.balanceOf(this.user1.address)
-        expect(balwavaxAfter).eq(balwavaxBefore.add(rewardAmount))
+        //   await this.wavax.connect(this.user1).approve(this.avaxVault.address, ethers.constants.MaxUint256)
+        //   await this.avaxVault.connect(this.user1).deposit(amountAVAX)
+
+        //   const balBearingTokenOfVault1 = await bearingToken.balanceOf(this.avaxVault.address)
+        //   const vTokenBalBefore = await this.avaxVault.balanceOf(this.user1.address)
+        //   console.log('vTokenBalBefore')
+        //   const balUnderlyingBefore = await this.avaxVault.callStatic.balanceOfUnderlying()
+        //   console.log('balUnderlyingBefore')
+        //   const balBefore = await this.wavax.balanceOf(this.user1.address)
+
+        //   const balBearingTokenOfVault2 = await bearingToken.balanceOf(this.avaxVault.address)
+
+        //   await this.avaxVault.connect(this.user1).withdraw(amountAVAX)
+        //   const vTokenAfter = await this.avaxVault.balanceOf(this.user1.address)
+
+        //   const balBearingTokenAfter = await bearingToken.balanceOf(this.avaxVault.address)
+        //   expect(balBearingTokenAfter).to.lt(balBearingTokenOfVault1)
+
+        //   const balAfter = await this.wavax.balanceOf(this.user1.address)
+        //   const balUnderlying = await this.avaxVault.callStatic.balanceOfUnderlying()
+        //   expect(balAfter).to.gt(balBefore)
+        //   expect(vTokenAfter).to.eq(0)
+        // })
+
+        it('should not be able to withdraw if exceeds balance', async () => {
+          const vTokenBal = await this.avaxVault.balanceOf(this.user1.address)
+          // try to withdraw exceeds balance
+          await expect(this.avaxVault.connect(this.user1).withdraw(vTokenBal.add(1))).to.be.revertedWith(
+            'ERC20: burn amount exceeds balance'
+          )
+        })
+        // it('should be able to withdraw AVAX as collateral successfully', async () => {
+        //   const amountAVAX = ethers.utils.parseEther('100')
+        //   const slippage = ethers.constants.Zero
+        //   const balAVAXBefore = await provider.getBalance(this.user1.address)
+        //   const balBearingTokenOfPoolBefore = await bearingToken.balanceOf(this.lendingPool.address)
+        //   console.log('balBearingTokenOfPoolBefore', balBearingTokenOfPoolBefore)
+        //   await this.avaxVault.connect(this.user1).depositCollateral(ethers.constants.AddressZero, amountAVAX, {
+        //     value: amountAVAX
+        //   })
+        //   const tx = await this.avaxVault
+        //     .connect(this.user1)
+        //     .withdrawCollateral(ethers.constants.AddressZero, amountAVAX, slippage, this.user1.address)
+        //   const receipt = await tx.wait()
+        //   // expect(balBearingTokenOfPoolAfter).to.gt(balBearingTokenOfPoolBefore.add(amountAVAX))
+        //   const balBearingTokenOfPool = await bearingToken.balanceOf(this.lendingPool.address)
+        //   expect(balBearingTokenOfPool).to.eq(0)
+        //   const balAVAXAfter = await provider.getBalance(this.user1.address)
+        //   console.log(
+        //     'balAVAXBefore',
+        //     ethers.utils.formatEther(balAVAXBefore.add(amountAVAX).sub(receipt.cumulativeGasUsed))
+        //   )
+        //   // balBefore - gasUsed + amountAVAX
+        //   console.log('balAVAXAfter', ethers.utils.formatEther(balAVAXAfter))
+        //   // expect(balAVAXAfter).to.gt(balAVAXBefore.add(amountAVAX).sub(receipt.cumulativeGasUsed))
+        // })
       })
     })
-  })
 
-  // describe('AAVE strategy', () => {
-  //   let aToken
-  //   let bearingToken
-  //   before(async () => {
-  //     const bearingTokenAddr = await this.avaxVault.getBearingToken()
-  //     bearingToken = new ethers.Contract(bearingTokenAddr, erc20Abi, this.owner)
-  //     aToken = new ethers.Contract(this.lendingPool.address, erc20Abi, this.owner)
-  //   })
-
-  //   describe('depositCollateral', () => {
-  //     it('should succeed to deposit WAVAX as collateral', async () => {
-  //       const amountWAVAX = ethers.utils.parseEther('100')
-  //       await this.wavax.connect(this.wavaxWhale).approve(this.avaxVault.address, ethers.constants.MaxUint256)
-
-  //       await this.avaxVault.connect(this.wavaxWhale).depositCollateral(this.wavax.address, amountWAVAX)
-
-  //       // const tx =
-  //       const balBearingTokenOfPool = await bearingToken.balanceOf(this.lendingPool.address)
-  //       expect(balBearingTokenOfPool).to.gte(amountWAVAX)
-
-  //       const balAToken = await aToken.balanceOf(this.wavaxWhale.address)
-  //       expect(balAToken).to.eq(amountWAVAX)
-  //     })
-
-  //     it('should succeed to depsot AVAX as collateral', async () => {
-  //       const amountAVAX = ethers.utils.parseEther('100')
-  //       const balBearingTokenOfPoolBefore = await bearingToken.balanceOf(this.lendingPool.address)
-  //       const aTokenBalBefore = await aToken.balanceOf(this.user1.address)
-
-  //       await this.avaxVault.connect(this.user1).depositCollateral(ethers.constants.AddressZero, amountAVAX, {
-  //         value: amountAVAX
-  //       })
-  //       const balBearingTokenOfPoolAfter = await bearingToken.balanceOf(this.lendingPool.address)
-  //       expect(balBearingTokenOfPoolAfter).to.gt(balBearingTokenOfPoolBefore.add(amountAVAX))
-  //       const aTokenBalAfter = await aToken.balanceOf(this.user1.address)
-  //       expect(aTokenBalAfter).eq(aTokenBalBefore.add(amountAVAX))
-  //     })
-
-  //     it('should harvest and reinvest on deposit', async () => {
-  //       // transfer wavax to aave reward controller
-
-  //       // get byte code of aaave incetives controller mock
-  //       const code = await hre.network.provider.send('eth_getCode', [this.aaveIncentivesController.address])
-  //       const AAVE_INCENTIVES_CONTROLLER_MAINNET_ADDR = '0x929EC64c34a17401F460460D4B9390518E5B473e'
-
-  //       await hre.network.provider.send('hardhat_setCode', [AAVE_INCENTIVES_CONTROLLER_MAINNET_ADDR, code])
-
-  //       // inject mock contract code to AAVE incentive controller mainnet address
-  //       this.aaveIncentivesController = await ethers.getContractAt(
-  //         'AaveIncentiveControllerMock',
-  //         AAVE_INCENTIVES_CONTROLLER_MAINNET_ADDR,
-  //         this.owner
-  //       )
-
-  //       // transfer WAVAX to incentive controller
-  //       await this.wavax
-  //         .connect(this.wavaxWhale)
-  //         .transfer(this.aaveIncentivesController.address, ethers.utils.parseEther('100'))
-
-  //       const rewardAmount = ethers.utils.parseEther('10')
-
-  //       // set availableRewards for vault
-  //       await this.aaveIncentivesController
-  //         .connect(this.owner)
-  //         .setAvailableRewards(this.avaxVault.address, rewardAmount)
-
-  //       // deposit collateral to trigger harvest
-  //       const amountWAVAX = ethers.utils.parseEther('100')
-  //       await this.wavax.connect(this.wavaxWhale).approve(this.avaxVault.address, ethers.constants.MaxUint256)
-
-  //       const balBearingTokenOfPoolBefore = await bearingToken.balanceOf(this.lendingPool.address)
-  //       await this.avaxVault.connect(this.wavaxWhale).depositCollateral(this.wavax.address, amountWAVAX)
-  //       const balBearingTokenOfPoolAfter = await bearingToken.balanceOf(this.lendingPool.address)
-
-  //       expect(balBearingTokenOfPoolAfter).to.gte(balBearingTokenOfPoolBefore.add(amountWAVAX).add(rewardAmount))
-  //     })
-  //   })
-
-  //   describe('Withdraw collateral', () => {
-  //     it('should be able to withdraw WAVAX collateral', async () => {
-  //       // deposit collateral
-  //       const amountWAVAX = ethers.utils.parseEther('100')
-  //       await this.wavax.connect(this.wavaxWhale).approve(this.avaxVault.address, ethers.constants.MaxUint256)
-
-  //       await this.avaxVault.connect(this.wavaxWhale).depositCollateral(this.wavax.address, amountWAVAX)
-
-  //       const slippage = ethers.constants.Zero
-  //       const balBefore = await this.wavax.balanceOf(this.wavaxWhale.address)
-
-  //       await this.avaxVault
-  //         .connect(this.wavaxWhale)
-  //         .withdrawCollateral(this.wavax.address, amountWAVAX, slippage, this.wavaxWhale.address)
-  //       const balAfter = await this.wavax.balanceOf(this.wavaxWhale.address)
-  //       const balBearingTokenOfVault = await bearingToken.balanceOf(this.avaxVault.address)
-
-  //       expect(balAfter).to.eq(balBefore.add(amountWAVAX))
-  //       expect(balBearingTokenOfVault).to.eq(0)
-  //     })
-
-  //     it('should be able to withdraw AVAX collateral', async () => {
-  //       const amount = ethers.utils.parseEther('10')
-  //       await this.avaxVault.connect(this.user1).depositCollateral(ethers.constants.AddressZero, amount, {
-  //         value: amount
-  //       })
-  //       const avaxBal = await provider.getBalance(this.user1.address)
-  //       console.log('avaxBal', ethers.utils.formatEther(avaxBal))
-  //       const slippage = ethers.constants.Zero
-  //       await this.avaxVault.withdrawCollateral(ethers.constants.AddressZero, amount, slippage, this.user1.address)
-  //       const avaxBalAfter = await provider.getBalance(this.user1.address)
-  //       console.log('avaxBalAfter', ethers.utils.formatEther(avaxBalAfter))
-  //       expect(avaxBalAfter).to.eq(avaxBal.add(amount))
-  //     })
-  //   })
-
-  //   describe('processYield', () => {
-  //     const avWAVAXAddr = '0x6d80113e533a2C0fe82EaBD35f1875DcEA89Ea97'
-  //     before(async () => {
-  //       // transfer aToken to lendingpool
-  //       const aTokenWhale = '0x2b6e061a8e0ca75eb26157efbfd077e3a23dc261'
-
-  //       await hre.network.provider.request({
-  //         method: 'hardhat_impersonateAccount',
-  //         params: [aTokenWhale]
-  //       })
-
-  //       const whale = await ethers.getSigner(aTokenWhale)
-  //       const avWAVAX = new ethers.Contract(avWAVAXAddr, erc20Abi, this.owner)
-
-  //       await avWAVAX.connect(whale).approve(this.lendingPool.address, ethers.utils.parseEther('100'))
-
-  //       await this.lendingPool.connect(whale).setTotalBalanceOfAssetPair(avWAVAXAddr, ethers.utils.parseEther('100'))
-  //     })
-  //     it('should setup correctly', async () => {
-  //       const result = await this.lendingPool.getTotalBalanceOfAssetPair(avWAVAXAddr)
-  //     })
-
-  //     it('should be able to process yield successfully', async () => {
-  //       const YIELD_MANAGER = ethers.utils.formatBytes32String('YIELD_MANAGER')
-  //       await this.addressProvider.setAddress(YIELD_MANAGER, this.owner.address)
-
-  //       const balBefore = await this.wavax.balanceOf(this.owner.address)
-  //       const yieldAmount = await this.avaxVault.getYieldAmount()
-
-  //       expect(yieldAmount).to.gt(0)
-  //       await this.avaxVault.processYield()
-  //       const balAfter = await this.wavax.balanceOf(this.owner.address)
-  //       expect(balAfter).to.eq(balBefore.add(yieldAmount))
-  //     })
-  //   })
-  // })
-
-  describe('BENQI Strategy', () => {
-    let aToken
-    let bearingToken
-    before(async () => {
-      // switch to benqi strategy
-      await this.avaxVault.connect(this.owner).switchStrategy(1)
-      const bearingTokenAddr = await this.avaxVault.getBearingToken()
-      bearingToken = await ethers.getContractAt('IqiAVAX', bearingTokenAddr, this.owner)
-      aToken = new ethers.Contract(this.lendingPool.address, erc20Abi, this.owner)
-    })
-
-    describe('depositCollateral', () => {
-      it('should be able to deposit AVAX as collateral successfully', async () => {
-        const amountAVAX = ethers.utils.parseEther('100')
+    describe('Process yield', () => {
+      it('deposit more', async () => {
+        const amountAVAX = ethers.utils.parseEther('1000')
         // const balBearingTokenOfPoolBefore = await bearingToken.balanceOf(this.lendingPool.address)
-        await this.avaxVault.connect(this.user1).depositCollateral(ethers.constants.AddressZero, amountAVAX, {
-          value: amountAVAX
-        })
+        await this.wavax.connect(this.wavaxWhale).approve(this.avaxVault.address, ethers.constants.MaxUint256) //
+        await this.avaxVault.connect(this.wavaxWhale).deposit(amountAVAX)
 
-        const balBearingTokenOfPool = await bearingToken.balanceOf(this.lendingPool.address)
-        // expect(balBearingTokenOfPoolAfter).to.gt(balBearingTokenOfPoolBefore.add(amountAVAX))
-        const aTokenBalAfter = await aToken.balanceOf(this.user1.address)
-        expect(balBearingTokenOfPool).to.not.eq(0)
-        expect(aTokenBalAfter).eq(balBearingTokenOfPool)
+        const totalSupply = await this.avaxVault.totalSupply()
       })
-    })
 
-    describe('withdrawCollateral', () => {
-      it('should be able to withdraw AVAX as collateral successfully', async () => {
-        const amountAVAX = ethers.utils.parseEther('100')
-
-        const slippage = ethers.constants.Zero
-        const balAVAXBefore = await provider.getBalance(this.user1.address)
-
-        const balBearingTokenOfPoolBefore = await bearingToken.balanceOf(this.lendingPool.address)
-        console.log('balBearingTokenOfPoolBefore', balBearingTokenOfPoolBefore)
-
-        await this.avaxVault.connect(this.user1).depositCollateral(ethers.constants.AddressZero, amountAVAX, {
-          value: amountAVAX
-        })
-
-        const tx = await this.avaxVault
-          .connect(this.user1)
-          .withdrawCollateral(ethers.constants.AddressZero, amountAVAX, slippage, this.user1.address)
-
-        const receipt = await tx.wait()
-
-        // expect(balBearingTokenOfPoolAfter).to.gt(balBearingTokenOfPoolBefore.add(amountAVAX))
-        const balBearingTokenOfPool = await bearingToken.balanceOf(this.lendingPool.address)
-        expect(balBearingTokenOfPool).to.eq(0)
-        const balAVAXAfter = await provider.getBalance(this.user1.address)
-        console.log(
-          'balAVAXBefore',
-          ethers.utils.formatEther(balAVAXBefore.add(amountAVAX).sub(receipt.cumulativeGasUsed))
-        )
-        // balBefore - gasUsed + amountAVAX
-        console.log('balAVAXAfter', ethers.utils.formatEther(balAVAXAfter))
-        // expect(balAVAXAfter).to.gt(balAVAXBefore.add(amountAVAX).sub(receipt.cumulativeGasUsed))
+      it('claim yield', async () => {
+        await this.avaxVault.connect(this.owner).setKeeper(this.owner.address, true)
+        const balUnderlying = await this.avaxVault.callStatic.balanceOfUnderlying()
+        console.log('balUnderlyingBefore', balUnderlying)
+        await this.avaxVault.connect(this.owner).claimYield()
+        const balUnderlyingAfter = await this.avaxVault.callStatic.balanceOfUnderlying()
+        console.log('balUnderlyingAfter', balUnderlyingAfter)
       })
     })
   })
-
-  describe('Switching startegy', () => {})
 })

@@ -1,154 +1,159 @@
+// SPDX-License-Identifier: agpl-3.0
 pragma solidity ^0.8.10;
 
-import {GeneralVault} from "./GeneralVault.sol";
-
+import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/token/ERC20/ERC20Upgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/token/ERC20/extensions/ERC20BurnableUpgradeable.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import {Errors} from "../libraries/helpers/Errors.sol";
-import {ILendingPoolAddressesProvider} from "../interfaces/ILendingPoolAddressesProvider.sol";
-import {PercentageMath} from "../libraries/math/PercentageMath.sol";
-import {IWAVAX} from "../interfaces/IWAVAX.sol";
+import "../libraries/math/PercentageMath.sol";
+import "../interfaces/IWAVAX.sol";
 import {BenqiStrategy} from "./strategies/BenqiStrategy.sol";
-import {ILendingPool} from "../interfaces/ILendingPool.sol";
 import "hardhat/console.sol";
 
 /**
- * @title AVAX Vault
- * @author DeDe
+ * @title GeneralVault
+ * @notice Basic feature of vault
+ * @author Dede
  **/
-contract AvaxBenqiVault is GeneralVault {
-  using SafeERC20 for IERC20;
+
+contract AvaxBenqiVault is Initializable, OwnableUpgradeable, ERC20Upgradeable, ERC20BurnableUpgradeable {
   using PercentageMath for uint256;
+  using SafeERC20 for IERC20;
+
+  event ProcessYield(address indexed collateralAsset, uint256 yieldAmount);
+  event SetTreasuryInfo(address indexed treasuryAddress, uint256 fee);
+  event Deposit(address indexed collateralAsset, address indexed from, uint256 amount);
+  event Withdraw(address indexed collateralAsset, address indexed to, uint256 amount);
+  event Harvest(address indexed collateralAsset, uint256 amount);
+  event SetKeeper(address keeper, bool flag);
 
   address public constant WAVAX = 0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7;
+  // aAvaWAVAX - bearing token of AVAX on Aaave AVAX market
+  address public constant bearingToken = 0x5C0401e81Bc07Ca70fAD469b451682c0d747Ef1c;
 
-  mapping(address => uint256) private _principal;
+  uint256 private constant VAULT_VERSION = 0x1;
+  // vault fee 20%
+  uint256 internal _vaultFee;
+  address internal _treasuryAddress;
+
+  bool public shouldHarvestOnDeposit;
+  mapping(address => bool) public _isKeeper;
 
   /**
-   * @dev Receive AVAX
-   */
-  receive() external payable {}
+   * @dev Function is invoked by the proxy contract when the Vault contract is deployed.
+   **/
+  function initialize() external initializer {
+    __ERC20_init(string(abi.encodePacked("Dede ", IERC20Metadata(WAVAX).name(), " Vault")), string(abi.encodePacked("v", IERC20Metadata(WAVAX).symbol())));
+    __Ownable_init();
+
+    shouldHarvestOnDeposit = true;
+  }
+
+  function getVersion() internal pure returns (uint256) {
+    return VAULT_VERSION;
+  }
+
+  function deposit(uint256 amount) external {
+    IERC20(WAVAX).transferFrom(msg.sender, address(this), amount);
+
+    console.log("step withdraw");
+    IWAVAX(WAVAX).withdraw(amount);
+    console.log("step deposit");
+    BenqiStrategy.deposit(amount);
+
+    if (shouldHarvestOnDeposit) {
+      uint256 harvestedAmount = BenqiStrategy.harvest(true);
+      // emit harvest
+      emit Harvest(bearingToken, harvestedAmount);
+    }
+
+    // mint the same underlying token amount to the depositor
+    _mint(msg.sender, amount);
+  }
+
+  function withdraw(uint256 amount) external {
+    // Convert amount of vToken to bearing token's amount of Benqi strategy
+    _burn(msg.sender, amount);
+    uint256 bearingTokenAmount = _convertToBearingTokenAmount(amount);
+    uint256 amountAVAX = BenqiStrategy.redeem(bearingTokenAmount);
+
+    IWAVAX(WAVAX).deposit{value: amountAVAX}();
+    IERC20(WAVAX).transfer(msg.sender, amountAVAX);
+  }
+
+  function _convertToBearingTokenAmount(uint256 underlyingAmount) internal returns (uint256) {
+    return BenqiStrategy.estimateConversionToBearingTokenAmount(underlyingAmount);
+  }
+
+  function getYieldAmount() public returns (uint256) {
+    uint256 balanceOfUnderlying = BenqiStrategy.balanceOfUnderlying(address(this));
+    uint256 totalSupply = totalSupply();
+    return balanceOfUnderlying > totalSupply ? balanceOfUnderlying - totalSupply : 0;
+  }
+
+  function balanceOfUnderlying() public returns (uint256) {
+    return BenqiStrategy.balanceOfUnderlying(address(this));
+  }
 
   /**
    * @dev Grab excess stETH which was from rebasing on Lido
    *  And convert stETH -> ETH -> asset, deposit to pool
    */
-  function processYield() external override {
-    ILendingPoolAddressesProvider provider = _addressesProvider;
-    address bearingToken = getBearingToken();
-    uint256 yieldAmount = _getYield(bearingToken);
-    uint256 fee = _vaultFee;
+  function claimYield() external {
+    require(_isKeeper[msg.sender], "CALLER_IS_NOT_A_KEEPER");
 
-    uint256 withdrawalAmount = BenqiStrategy.redeemAVAX(yieldAmount);
-    IWAVAX(WAVAX).deposit{value: withdrawalAmount}();
+    uint256 fee = _vaultFee;
+    uint256 yieldAmount = getYieldAmount();
+    console.log("yieldAmount", yieldAmount);
+    uint256 balBefore = address(this).balance;
+    BenqiStrategy.redeemUnderlying(yieldAmount);
+    uint256 amountAVAX = address(this).balance - balBefore;
+    console.log("amountAVAX", yieldAmount);
+
+    IWAVAX(WAVAX).deposit{value: yieldAmount}();
 
     if (fee > 0) {
-      uint256 treasuryAmount = withdrawalAmount.percentMul(fee);
+      uint256 treasuryAmount = yieldAmount.percentMul(fee);
       IERC20(WAVAX).safeTransfer(_treasuryAddress, treasuryAmount);
-      withdrawalAmount -= treasuryAmount;
+      yieldAmount -= treasuryAmount;
     }
 
-    address yieldManager = provider.getAddress("YIELD_MANAGER");
-    IERC20(WAVAX).safeTransfer(yieldManager, withdrawalAmount);
-    emit ProcessYield(WAVAX, withdrawalAmount);
+    IERC20(WAVAX).safeTransfer(msg.sender, yieldAmount);
+    emit ProcessYield(WAVAX, yieldAmount);
   }
 
   /**
-   * @dev Get yield amount based on strategy
+   * @dev Set treasury address and vault fee
+   * @param _treasury The treasury address
+   * @param _fee The vault fee which has more two decimals, ex: 100% = 100_00
    */
-  function getYieldAmount() external view returns (uint256) {
-    return _getYieldAmount(getBearingToken());
+  function setTreasuryInfo(address _treasury, uint256 _fee) external onlyOwner {
+    require(_treasury != address(0), "INVALID_TREASURY_ADDRESS");
+    require(_fee <= 30_00, "FEE_TOO_BIG");
+    _treasuryAddress = _treasury;
+    _vaultFee = _fee;
+
+    emit SetTreasuryInfo(_treasury, _fee);
+  }
+
+  function setHarvestOnDeposit(bool flag) external onlyOwner {
+    shouldHarvestOnDeposit = flag;
+  }
+
+  function setKeeper(address addr, bool flag) external onlyOwner {
+    _isKeeper[addr] = flag;
   }
 
   /**
-   * @dev Get price per share based on yield strategy
+   * @dev Receive AVAX
    */
-  function pricePerShare() external pure override returns (uint256) {
-    return 1e18;
-  }
-
-  function getBearingToken() public view returns (address) {
-    // return benqi
-    return BenqiStrategy.getBearingToken();
-  }
-
-  /**
-   * @dev Deposit to yield pool based on strategy and receive stAsset
-   */
-  function _depositToYieldPool(address _asset, uint256 _amount) internal override returns (address, uint256) {
-    ILendingPoolAddressesProvider provider = _addressesProvider;
-    address lendingPool = provider.getLendingPool();
-    require(lendingPool != address(0), Errors.VT_INVALID_CONFIGURATION);
-
-    // Check if this is an AVAX deposit
-    // if (!isNativeDeposit) {
-    //   // transfer WAVAX from the user to the vault
-    //   require(_asset == WAVAX, Errors.VT_COLLATERAL_DEPOSIT_INVALID);
-    //   IERC20(WAVAX).safeTransferFrom(msg.sender, address(this), _amount);
-    // }
-
-    _principal[msg.sender] += _amount;
-    address bearingToken = getBearingToken();
-    uint256 bearingTokenReceivedAmount = BenqiStrategy.depositAVAX(_amount);
-
-    if (shouldHarvestOnDeposit) {
-      uint256 harvestedAmount = BenqiStrategy.harvest(true);
-      if (harvestedAmount > 0) {
-        // depoist harvested bearing token to the lending pool
-        IERC20(bearingToken).approve(lendingPool, 0);
-        IERC20(bearingToken).approve(lendingPool, bearingTokenReceivedAmount + harvestedAmount);
-
-        _depositYield(bearingToken, harvestedAmount);
-        return (bearingToken, bearingTokenReceivedAmount);
-      }
-    }
-
-    IERC20(bearingToken).approve(lendingPool, 0);
-    IERC20(bearingToken).approve(lendingPool, bearingTokenReceivedAmount);
-    return (bearingToken, bearingTokenReceivedAmount);
-  }
-
-  /**
-   * @dev Get Withdrawal amount of stAsset based on strategy
-   */
-  function _getWithdrawalAmount(address _asset, uint256 _amount) internal view override returns (address, uint256) {
-    // address LIDO = _addressesProvider.getAddress("LIDO");
-    require(_asset == WAVAX || _asset == address(0), Errors.VT_COLLATERAL_WITHDRAW_INVALID);
-    // // In this vault, return same amount of asset
-
-    // case benqi strategy, convert underlying asset (AVAX) amount to bearing token amount
-    return (getBearingToken(), BenqiStrategy.estimateConversionToBearingTokenAmount(_amount));
-  }
-
-  /**
-   * @dev Withdraw from yield pool based on strategy with stAsset and deliver asset
-   */
-  function _withdrawFromYieldPool(
-    address _asset,
-    uint256 _bearingTokenAmount,
-    address _to
-  ) internal override returns (uint256) {
-    ILendingPoolAddressesProvider provider = _addressesProvider;
-    // address LIDO = provider.getAddress("LIDO");
-    require(_to != address(0), Errors.VT_COLLATERAL_WITHDRAW_INVALID);
-    // check if AVAX withdrawal
-    uint256 redeemedAmount = BenqiStrategy.redeemAVAX(_bearingTokenAmount);
-    uint256 principal = _principal[msg.sender];
-    uint256 receivableAmount = redeemedAmount > principal ? principal : redeemedAmount;
-    _principal[msg.sender] -= receivableAmount;
-    payable(_to).transfer(receivableAmount);
-    return receivableAmount;
-  }
-
-  function _getYieldAmount(address _stAsset) internal view override returns (uint256) {
-    (uint256 stAssetBalance, uint256 aTokenBalance) = ILendingPool(_addressesProvider.getLendingPool()).getTotalBalanceOfAssetPair(_stAsset);
-    if (stAssetBalance > aTokenBalance) return stAssetBalance - aTokenBalance;
-
-    return 0;
-  }
-
-  function _safeTransferAVAX(address to, uint256 value) internal {
-    (bool success, ) = to.call{value: value}(new bytes(0));
-    require(success, "TransferHelper::safeTransferAVAX: AVAX transfer failed");
-  }
+  receive() external payable {}
 }
+
+// switch strategy
+// withdraw all tokens from the protocol, with draw all unclaimed yield
+// deposit to the new protocol, withdraw all unclaimed yield
+//

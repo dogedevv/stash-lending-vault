@@ -1,168 +1,125 @@
+// SPDX-License-Identifier: agpl-3.0
 pragma solidity ^0.8.10;
 
-import {GeneralVault} from "./GeneralVault.sol";
-
+import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/token/ERC20/ERC20Upgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/token/ERC20/extensions/ERC20BurnableUpgradeable.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import {Errors} from "../libraries/helpers/Errors.sol";
-import {ILendingPoolAddressesProvider} from "../interfaces/ILendingPoolAddressesProvider.sol";
-import {PercentageMath} from "../libraries/math/PercentageMath.sol";
-import {IWAVAX} from "../interfaces/IWAVAX.sol";
+
+import "../libraries/math/PercentageMath.sol";
 import {AaveStrategy} from "./strategies/AaveStrategy.sol";
-import {BenqiStrategy} from "./strategies/BenqiStrategy.sol";
-import {ILendingPool} from "../interfaces/ILendingPool.sol";
-import "hardhat/console.sol";
 
 /**
- * @title AVAX Vault using Aave strategy
- * @author DeDe
+ * @title GeneralVault
+ * @notice Basic feature of vault
+ * @author Dede
  **/
-contract AvaxAaveVault is GeneralVault {
-  using SafeERC20 for IERC20;
+
+contract AvaxAaveVault is Initializable, OwnableUpgradeable, ERC20Upgradeable, ERC20BurnableUpgradeable {
   using PercentageMath for uint256;
+  using SafeERC20 for IERC20;
+
+  event ProcessYield(address indexed collateralAsset, uint256 yieldAmount);
+  event SetTreasuryInfo(address indexed treasuryAddress, uint256 fee);
+  event Deposit(address indexed collateralAsset, address indexed from, uint256 amount);
+  event Withdraw(address indexed collateralAsset, address indexed to, uint256 amount);
+  event Harvest(address indexed collateralAsset, uint256 amount);
+  event SetKeeper(address keeper, bool flag);
 
   address public constant WAVAX = 0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7;
+  // aAvaWAVAX - bearing token of AVAX on Aaave AVAX market
+  address public constant bearingToken = 0x6d80113e533a2C0fe82EaBD35f1875DcEA89Ea97;
+
+  uint256 private constant VAULT_VERSION = 0x1;
+  // vault fee 20%
+  uint256 internal _vaultFee;
+  address internal _treasuryAddress;
+
+  bool public shouldHarvestOnDeposit;
+  mapping(address => bool) public _isKeeper;
 
   /**
-   * @dev Receive AVAX
-   */
-  receive() external payable {}
+   * @dev Function is invoked by the proxy contract when the Vault contract is deployed.
+   **/
+  function initialize() external initializer {
+    __ERC20_init(string(abi.encodePacked("Dede ", IERC20Metadata(WAVAX).name(), " Vault")), string(abi.encodePacked("v", IERC20Metadata(WAVAX).symbol())));
+    __Ownable_init();
+
+    shouldHarvestOnDeposit = true;
+  }
+
+  function getVersion() internal pure returns (uint256) {
+    return VAULT_VERSION;
+  }
+
+  function deposit(uint256 amount) external {
+    IERC20(WAVAX).transferFrom(msg.sender, address(this), amount);
+    // receiptAmount of bearing token
+    AaveStrategy.deposit(WAVAX, amount);
+
+    if (shouldHarvestOnDeposit) {
+      uint256 harvestedAmount = AaveStrategy.harvest(true);
+      // emit harvest
+      emit Harvest(bearingToken, harvestedAmount);
+    }
+
+    _mint(msg.sender, amount);
+  }
+
+  function withdraw(uint256 amount) external {
+    _burn(msg.sender, amount);
+    AaveStrategy.withdraw(WAVAX, amount, msg.sender);
+  }
+
+  function getYieldAmount() public view returns (uint256) {
+    uint256 bearingBal = IERC20(bearingToken).balanceOf(address(this));
+    uint256 totalSupply = totalSupply();
+    return bearingBal > totalSupply ? bearingBal - totalSupply : 0;
+  }
 
   /**
    * @dev Grab excess stETH which was from rebasing on Lido
    *  And convert stETH -> ETH -> asset, deposit to pool
    */
-  function processYield() external override {
-    ILendingPoolAddressesProvider provider = _addressesProvider;
-    address bearingToken = getBearingToken();
-    uint256 yieldAmount = _getYield(bearingToken);
-    uint256 fee = _vaultFee;
-    uint256 withdrawalAmount = _strategyWithdraw(yieldAmount, false, address(this));
+  function claimYield() external {
+    require(_isKeeper[msg.sender], "CALLER_IS_NOT_A_KEEPER");
 
-    address yieldManager = provider.getAddress("YIELD_MANAGER");
+    uint256 yieldAmount = getYieldAmount();
+    uint256 fee = _vaultFee;
+    uint256 withdrawalAmount = AaveStrategy.withdraw(WAVAX, yieldAmount, address(this));
+
     if (fee > 0) {
       uint256 treasuryAmount = withdrawalAmount.percentMul(fee);
       IERC20(WAVAX).safeTransfer(_treasuryAddress, treasuryAmount);
       withdrawalAmount -= treasuryAmount;
     }
 
-    IERC20(WAVAX).safeTransfer(yieldManager, withdrawalAmount);
+    IERC20(WAVAX).safeTransfer(msg.sender, withdrawalAmount);
     emit ProcessYield(WAVAX, withdrawalAmount);
   }
 
   /**
-   * @dev Get yield amount based on strategy
+   * @dev Set treasury address and vault fee
+   * @param _treasury The treasury address
+   * @param _fee The vault fee which has more two decimals, ex: 100% = 100_00
    */
-  function getYieldAmount() external view returns (uint256) {
-    return _getYieldAmount(getBearingToken());
+  function setTreasuryInfo(address _treasury, uint256 _fee) external onlyOwner {
+    require(_treasury != address(0), "INVALID_TREASURY_ADDRESS");
+    require(_fee <= 30_00, "FEE_TOO_BIG");
+    _treasuryAddress = _treasury;
+    _vaultFee = _fee;
+
+    emit SetTreasuryInfo(_treasury, _fee);
   }
 
-  /**
-   * @dev Get price per share based on yield strategy
-   */
-  function pricePerShare() external pure override returns (uint256) {
-    return 1e18;
+  function setHarvestOnDeposit(bool flag) external onlyOwner {
+    shouldHarvestOnDeposit = flag;
   }
 
-  function _strategyDeposit(uint256 amount, bool isNativeDeposit) private returns (uint256 bearingTokenReceivedAmount) {
-    if (isNativeDeposit) {
-      // deposit AVAX
-      AaveStrategy.depositAVAX(amount);
-      return amount;
-    } else {
-      // deposit WAVAX
-      AaveStrategy.deposit(WAVAX, amount);
-      return amount;
-    }
-  }
-
-  function _strategyHarvest() private returns (uint256 harvestedAmount) {
-    return AaveStrategy.harvest(WAVAX, true);
-  }
-
-  function _strategyWithdraw(
-    uint256 amount,
-    bool isNativeWithdrawal,
-    address receiver
-  ) private returns (uint256) {
-    if (isNativeWithdrawal) {
-      return AaveStrategy.withdrawAVAX(amount, receiver);
-    }
-
-    return AaveStrategy.withdraw(WAVAX, amount, receiver);
-  }
-
-  function getBearingToken() public view returns (address) {
-    return AaveStrategy.getBearingToken(WAVAX);
-  }
-
-  /**
-   * @dev Deposit to yield pool based on strategy and receive stAsset
-   */
-  function _depositToYieldPool(address _asset, uint256 _amount) internal override returns (address, uint256) {
-    ILendingPoolAddressesProvider provider = _addressesProvider;
-    address lendingPool = provider.getLendingPool();
-    require(lendingPool != address(0), Errors.VT_INVALID_CONFIGURATION);
-
-    // Check if this is an AVAX deposit
-    bool isNativeDeposit = (_asset == address(0));
-    if (!isNativeDeposit) {
-      // transfer WAVAX from the user to the vault
-      require(_asset == WAVAX, Errors.VT_COLLATERAL_DEPOSIT_INVALID);
-      IERC20(WAVAX).safeTransferFrom(msg.sender, address(this), _amount);
-    }
-
-    uint256 bearingTokenReceivedAmount = _strategyDeposit(_amount, isNativeDeposit);
-
-    address bearingToken = getBearingToken();
-    if (shouldHarvestOnDeposit) {
-      uint256 harvestedAmount = _strategyHarvest();
-      if (harvestedAmount > 0) {
-        // depoist harvested bearing token to the lending pool
-        IERC20(bearingToken).approve(lendingPool, 0);
-        IERC20(bearingToken).approve(lendingPool, bearingTokenReceivedAmount + harvestedAmount);
-        _depositYield(bearingToken, harvestedAmount);
-        return (bearingToken, bearingTokenReceivedAmount);
-      }
-    }
-
-    IERC20(bearingToken).approve(lendingPool, 0);
-    IERC20(bearingToken).approve(lendingPool, bearingTokenReceivedAmount);
-    return (bearingToken, bearingTokenReceivedAmount);
-  }
-
-  /**
-   * @dev Get Withdrawal amount of stAsset based on strategy
-   */
-  function _getWithdrawalAmount(address _asset, uint256 _amount) internal view override returns (address, uint256) {
-    // address LIDO = _addressesProvider.getAddress("LIDO");
-    require(_asset == WAVAX || _asset == address(0), Errors.VT_COLLATERAL_WITHDRAW_INVALID);
-    // // In this vault, return same amount of asset
-
-    address bearingToken = getBearingToken();
-    // return the same amount for AAVE strategy
-    return (bearingToken, _amount);
-  }
-
-  /**
-   * @dev Withdraw from yield pool based on strategy with stAsset and deliver asset
-   */
-  function _withdrawFromYieldPool(
-    address _asset,
-    uint256 _amount,
-    address _to
-  ) internal override returns (uint256) {
-    ILendingPoolAddressesProvider provider = _addressesProvider;
-    // address LIDO = provider.getAddress("LIDO");
-    require(_to != address(0), Errors.VT_COLLATERAL_WITHDRAW_INVALID);
-    // check if AVAX withdrawal
-    bool isNativeWithdrawal = _asset == address(0);
-    return _strategyWithdraw(_amount, isNativeWithdrawal, _to);
-  }
-
-  function _getYieldAmount(address _stAsset) internal view override returns (uint256) {
-    (uint256 stAssetBalance, uint256 aTokenBalance) = ILendingPool(_addressesProvider.getLendingPool()).getTotalBalanceOfAssetPair(_stAsset);
-    if (stAssetBalance > aTokenBalance) return stAssetBalance - aTokenBalance;
-    return 0;
+  function setKeeper(address addr, bool flag) external onlyOwner {
+    _isKeeper[addr] = flag;
   }
 }

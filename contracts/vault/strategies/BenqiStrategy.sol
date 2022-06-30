@@ -9,7 +9,6 @@ import "./libs/BenqiLibrary.sol";
 import "../../libraries/DexLibrary.sol";
 import "../../interfaces/dex/IPair.sol";
 import "../../interfaces/dex/IWAVAX.sol";
-import "hardhat/console.sol";
 import "../../libraries/math/Exponential.sol";
 
 library BenqiStrategy {
@@ -18,7 +17,7 @@ library BenqiStrategy {
   address constant QI = 0x8729438EB15e2C8B576fCc6AeCdA6A148776C0F5;
   address constant QI_AVAX = 0x5C0401e81Bc07Ca70fAD469b451682c0d747Ef1c;
   address constant TOKEN_DELEGATOR = 0x76145e99d3F4165A313E8219141ae0D26900B710;
-  address constant WAVAX = 0xE530dC2095Ef5653205CF5ea79F8979a7028065c;
+  address constant WAVAX = 0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7;
 
   // pangoli qi wavax LP
   address constant QI_WAVAX_LP = 0xE530dC2095Ef5653205CF5ea79F8979a7028065c;
@@ -28,9 +27,9 @@ library BenqiStrategy {
 
   event StratHarvest(address indexed harvester, address underlyingAssetHarvested, uint256 amount);
 
-  function depositAVAX(uint256 amount) internal returns (uint256) {
+  function deposit(uint256 amount) internal returns (uint256) {
     uint256 balBefore = IqiAVAX(QI_AVAX).balanceOf(address(this));
-    IqiAVAX(QI_AVAX).mint{value: msg.value}();
+    IqiAVAX(QI_AVAX).mint{value: amount}();
 
     uint256 balAfter = IqiAVAX(QI_AVAX).balanceOf(address(this));
     uint256 amountQiAVAX = balAfter - balBefore;
@@ -38,18 +37,29 @@ library BenqiStrategy {
   }
 
   // redeem qiToken for underlying AVAX
-  function redeemAVAX(uint256 qiTokenAmount) internal returns (uint256) {
+  function redeem(uint256 qiTokenAmount) internal returns (uint256) {
     uint256 balBefore = address(this).balance;
     require(IqiAVAX(QI_AVAX).redeem(qiTokenAmount) == 0, "BenqiStrategy::failed to redeem");
     uint256 redeemableAmount = address(this).balance - balBefore;
-    // console.log("redeemedAvaxAmount", redeemedAvaxAmount);
-    // payable(receiver).transfer(redeemedAvaxAmount);
     return redeemableAmount;
+  }
+
+  function redeemUnderlying(uint256 underlyingAmount) internal {
+    require(IqiAVAX(QI_AVAX).redeemUnderlying(underlyingAmount) == 0, "BenqiStrategy::failed to redeem underlying");
+  }
+
+  function redeemAll() internal returns (uint256) {
+    uint256 balBefore = address(this).balance;
+    uint256 qiBal = IERC20(QI).balanceOf(address(this));
+    require(IqiAVAX(QI_AVAX).redeem(qiBal) == 0, "BenqiStrategy:: failed to redeem all");
+
+    uint256 amountAVAX = address(this).balance - balBefore;
+    return amountAVAX;
   }
 
   // harvest incentive reward
   function harvest(bool shouldReinvest) internal returns (uint256 harvestedAmount) {
-    uint256 rewards = availableIncetiveRewards();
+    uint256 rewards = availableRewards();
     if (rewards == 0) {
       return 0;
     }
@@ -79,14 +89,16 @@ library BenqiStrategy {
     uint256 totalWavax = wavaxGot + avaxReward;
     if (shouldReinvest && totalWavax > 0) {
       uint256 balBefore = IqiAVAX(QI_AVAX).balanceOf(address(this));
-      depositAVAX(harvestedAmount);
+      deposit(totalWavax);
       uint256 balAfter = IqiAVAX(QI_AVAX).balanceOf(address(this));
       uint256 qiAvaxAmount = balAfter - balBefore;
       return qiAvaxAmount;
     }
+
+    return totalWavax;
   }
 
-  function availableIncetiveRewards() internal returns (uint256) {
+  function availableRewards() internal view returns (uint256) {
     uint256 qiIncentivesAmount = COMP_CONTROLLER.rewardAccrued(QI_MARKET_INDEX, address(this));
     uint256 avaxIncentivesAmount = COMP_CONTROLLER.rewardAccrued(AVAX_MARKET_INDEX, address(this));
     // estimate conversion from qi to wavax
@@ -100,12 +112,16 @@ library BenqiStrategy {
   }
 
   // estimate neededed amount of bearing token amount to redeem an expected amount of undelrying asset
-  function estimateConversionToBearingTokenAmount(uint256 amountUnderlying) internal view returns (uint256 amountBearingToken) {
-    Exponential.Exp memory exchangeRate = Exponential.Exp({mantissa: IqiAVAX(QI_AVAX).exchangeRateStored()});
+  function estimateConversionToBearingTokenAmount(uint256 amountUnderlying) internal returns (uint256 amountBearingToken) {
+    Exponential.Exp memory exchangeRate = Exponential.Exp({mantissa: IqiAVAX(QI_AVAX).exchangeRateCurrent()});
     return Exponential.div_(amountUnderlying, exchangeRate);
   }
 
-  function getBearingToken() internal view returns (address) {
+  function balanceOfUnderlying(address account) internal returns (uint256) {
+    return IqiAVAX(QI_AVAX).balanceOfUnderlying(account);
+  }
+
+  function getBearingToken() internal pure returns (address) {
     return QI_AVAX;
   }
 }

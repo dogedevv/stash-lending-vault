@@ -5,4 +5,6 @@ interface IWAVAX {
   function deposit() external payable;
 
   function withdraw(uint256) external;
+
+  function totalSupply() external view returns (uint256);
 }
